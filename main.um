@@ -1,0 +1,260 @@
+import (
+    "std.um"
+    "umbox/os/os.um"
+)
+
+type (
+    Id = str
+    
+    Output = struct {
+        dir:   str
+        dirs:  []str
+        files: map[str]str
+    }
+
+    File = struct {
+        ignoreParent: bool
+        current:      int
+        segments:     []str
+        sections:     map[str]int
+    }
+
+    Context = struct {
+        location: str
+        rootDir:  str
+        pagesDir: str
+    }
+)
+
+fn fileReadAssert(path: str): str {
+    printf("Processing... %s\n", path)
+    file, err := std::fopen(path, "rb")
+    std::exitif(err)
+    data, err := std::freadall(file)
+    std::exitif(err)
+    std::exitif(std::fclose(file))
+    return str(data)
+}
+
+fn joinFile(file: File): str {
+    s := ""
+    for _, seg in file.segments {
+        s += seg
+    }
+    return s
+}
+
+
+fn stringEndsIn(s, i: str): bool {
+    return len(s) >= len(i) && slice(s, len(s)-len(i)) == i
+}
+
+fn writeToSegment(file: ^File, txt: str) {
+    if file.current == -1 {
+        return
+    }
+
+    if len(file.segments) == 0 {
+        file.segments = append(file.segments, "")
+    }
+
+    file.segments[file.current] += txt
+}
+
+fn newSegment(file: ^File) {
+    file.segments = insert(file.segments, file.current+1, "")
+    file.current++
+}
+
+fn newSection(file: ^File, sec: str) {
+    newSegment(file)
+    file.sections[sec] = file.current
+}
+
+fn newSectionIgnore(file: ^File, sec: str) {
+    file.sections[sec] = -1
+}
+
+fn doPreprocess(context: ^Context, contents: str, parent: ^File = null): File
+fn doDirective(context: ^Context, file: ^File, directive: []str) {
+    std::assert(len(directive) > 0, "directive must have at least one element")
+    if directive[0] == "include" {
+        std::assert(len(directive) == 2, "include directive must have exactly one argument (path)")
+        writeToSegment(file, fileReadAssert(context.rootDir+"/"+directive[1]))
+    } else if directive[0] == "insert" {
+        std::assert(len(directive) == 2, "insert directive must have exactly one argument (section name)")
+        if directive[1] == "$location" {
+            writeToSegment(file, context.location)
+        } else {
+            newSection(file, directive[1])
+            newSegment(file)
+        }
+    } else if directive[0] == "ignore" {
+        std::assert(len(directive) == 2, "ignore directive must have exactly one argument (section name)")
+        newSectionIgnore(file, directive[1])
+    } else if directive[0] == "section" {
+        std::assert(len(directive) == 2, "section directive must have exactly one argument (section name)")
+        if !validkey(file.sections, directive[1]) {
+            std::assert(false, "no such section '"+directive[1]+"'")
+        }
+
+        file.current = file.sections[directive[1]]
+    } else if directive[0] == "enumerate" {
+        std::assert(len(directive) == 3, "enumerate directive must have exactly two arguments (template path, directory path)")
+        dir := context.pagesDir+"/"+directive[2]
+
+        paths, err := os::listdir(dir)
+        sort(paths, false)
+        std::exitif(err)
+
+        initLocation := context.location
+
+        for i, path in paths {
+            if stringEndsIn(path, ".html") {
+                context.location = "/"+directive[2]+"/"+path
+                parent := doPreprocess(context, fileReadAssert(context.rootDir+"/"+directive[1]))
+                result := doPreprocess(context, fileReadAssert(dir+"/"+path), &parent)
+                writeToSegment(file, joinFile(result))
+            }
+        }
+
+        context.location = initLocation
+    } else if directive[0] == "use" {
+        std::assert(len(directive) == 2, "use directive must have exactly one argument (path)")
+        if !file.ignoreParent {
+            parent := doPreprocess(context, fileReadAssert(context.rootDir+"/"+directive[1]))
+            file ^= parent
+        }
+    } else {
+        std::assert(false, "unknown directive '"+directive[0]+"'")
+    }
+}
+
+fn isSpace(c: char): bool {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+fn trim(s: str): str {
+    i := 0
+    j := len(s)-1
+
+    for i < len(s) && isSpace(s[i]) {
+        i += 1
+    }
+
+    for j >= 0 && isSpace(s[i]) {
+        j -= 1
+    }
+
+    return slice(s, i, j+1)
+}
+
+fn splitBySpace(s: str): []str {
+    raw := []str{}
+    acc := ""
+
+    for i, c in s {
+        if isSpace(c) {
+            raw = append(raw, trim(acc))
+            acc = ""
+        } else {
+            acc += c
+        }
+    }
+
+    raw = append(raw, trim(acc))
+
+    result := []str{}
+    for i, s in raw {
+        if s != "" {
+            result = append(result, s)
+        }
+    }
+
+    return result
+}
+
+fn doPreprocess(context: ^Context, contents: str, parent: ^File = null): File {
+    file := File{}
+
+    if parent != null {
+        file = parent^
+        file.sections = copy(parent.sections)
+        file.segments = copy(parent.segments)
+        file.ignoreParent = true
+    }
+
+
+    for i in contents {
+        if contents[i] == '\\' && contents[i+1] == '[' && contents[i+2] == '[' {
+            i += 2
+            writeToSegment(&file, "[[")
+        } else if contents[i] == '[' && contents[i+1] == '[' {
+            i += 2
+
+            s := ""
+            for !(contents[i] == ']' && contents[i+1] == ']') {
+                s += contents[i]
+                i += 1
+            }
+            i += 1
+
+            directive := splitBySpace(s)
+            doDirective(context, &file, directive)
+        } else {
+            writeToSegment(&file, contents[i]+"")
+        }
+    }
+    
+    return file
+}
+
+
+
+fn writeOutput(context: ^Context, output: ^Output) {
+    os::mkdirp(output.dir)
+
+    for _, dir in output.dirs {
+        os::mkdirp(output.dir+"/"+dir)
+    }
+
+    for file, content in output.files {
+        f, err := std::fopen(output.dir+"/"+file, "wb")
+        std::exitif(err)
+        std::exitif(std::fwrite(f, []char(content)).item1)
+        std::exitif(std::fclose(f))
+    }
+}
+
+
+fn main() {
+    if std::argc() != 4 {
+        printf("Usage: <root> <pages> <outputdir>\n")
+        exit(1)
+    }
+
+    context := &Context{
+        rootDir: std::argv(1),
+        pagesDir: std::argv(2)
+    }
+
+    output := &Output{}
+
+    output.dir = std::argv(3)
+
+    err := os::walk(context.pagesDir, |context, output| {
+        relative := slice(file, len(context.pagesDir))
+
+        if stringEndsIn(file, ".html") {
+            output.files[relative] = joinFile(doPreprocess(context, fileReadAssert(file)))
+        } else if os::isdir(file) {
+            output.dirs = append(output.dirs, relative)
+        }
+    })
+
+    //printf("%v\n", output^)
+
+    writeOutput(context, output)
+
+    std::exitif(err)
+}

@@ -1,0 +1,14 @@
+{
+	"name": "stm",
+	"version": "v0.1.0",
+	"author": "ske",
+	"license": "MIT",
+	"description": "Simple template engine in Umka",
+	"readme": "README.md",
+	"dependencies": [
+		"os"
+	],
+	"include": [
+		"main.um"
+	]
+}
